@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"text/template"
@@ -196,11 +197,32 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.SwarmMaster = flags.Bool("swarm-master")
 	d.SwarmHost = flags.String("swarm-host")
 	d.SwarmDiscovery = flags.String("swarm-discovery")
-	d.ISO = d.ResolveStorePath(isoFilename)
+	isoPath, err := absolutePath(d.ResolveStorePath(isoFilename))
+	if err != nil {
+		return errors.New("Cannot resolve ISO path to absolute location!")
+	}
+	d.ISO = isoPath
 	d.SSHUser = flags.String("kvm-ssh-user")
 	d.SSHPort = 22
-	d.DiskPath = d.ResolveStorePath(fmt.Sprintf("%s.img", d.MachineName))
+	imgPath, err := absolutePath(d.ResolveStorePath(fmt.Sprintf("%s.img", d.MachineName)))
+	if err != nil {
+		return errors.New("Cannot resolve image path to absolute location!")
+	}
+	d.DiskPath = imgPath
 	return nil
+}
+
+func absolutePath(fpath string) (string, error) {
+	if !path.IsAbs(fpath) {
+		cwd, err := os.Getwd()
+		if err == nil {
+			fpath = path.Join(cwd, fpath);
+			log.Debugf("Resolved relative path to: %s", fpath)
+		} else {
+			return fpath , err
+		}
+	}
+	return fpath, nil
 }
 
 func (d *Driver) GetURL() (string, error) {
@@ -361,7 +383,7 @@ func (d *Driver) Create() error {
 
 	// Libvirt typically runs as a deprivileged service account and
 	// needs the execute bit set for directories that contain disks
-	for dir := d.ResolveStorePath("."); dir != "/"; dir = filepath.Dir(dir) {
+	for dir := d.ResolveStorePath("."); dir != "/" && dir != "." ; dir = filepath.Dir(dir) {
 		log.Debugf("Verifying executable bit set on %s", dir)
 		info, err := os.Stat(dir)
 		if err != nil {
