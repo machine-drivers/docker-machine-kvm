@@ -1,13 +1,11 @@
-package kvm
+package libvirt
 
 import (
-	"archive/tar"
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -17,80 +15,32 @@ import (
 
 	libvirt "github.com/libvirt/libvirt-go"
 
-	"github.com/docker/machine/libmachine/drivers"
-	"github.com/docker/machine/libmachine/log"
-	"github.com/docker/machine/libmachine/mcnflag"
-	"github.com/docker/machine/libmachine/mcnutils"
-	"github.com/docker/machine/libmachine/ssh"
-	"github.com/docker/machine/libmachine/state"
-)
+	// Machine-drivers
+	"github.com/code-ready/machine/libmachine/drivers"
+	"github.com/code-ready/machine/libmachine/log"
+	"github.com/code-ready/machine/libmachine/mcnflag"
+	"github.com/code-ready/machine/libmachine/state"
 
-const (
-	connectionString   = "qemu:///system"
-	privateNetworkName = "docker-machines"
-	isoFilename        = "boot2docker.iso"
-	dnsmasqLeases      = "/var/lib/libvirt/dnsmasq/%s.leases"
-	dnsmasqStatus      = "/var/lib/libvirt/dnsmasq/%s.status"
-	defaultSSHUser     = "docker"
-
-	domainXMLTemplate = `<domain type='kvm'>
-  <name>{{.MachineName}}</name> <memory unit='M'>{{.Memory}}</memory>
-  <vcpu>{{.CPU}}</vcpu>
-  <features><acpi/><apic/><pae/></features>
-  <cpu mode='host-passthrough'></cpu>
-  <os>
-    <type>hvm</type>
-    <boot dev='cdrom'/>
-    <boot dev='hd'/>
-    <bootmenu enable='no'/>
-  </os>
-  <devices>
-    <disk type='file' device='cdrom'>
-      <source file='{{.ISO}}'/>
-      <target dev='hdc' bus='ide'/>
-      <readonly/>
-    </disk>
-    <disk type='file' device='disk'>
-      <driver name='qemu' type='raw' cache='{{.CacheMode}}' io='{{.IOMode}}' />
-      <source file='{{.DiskPath}}'/>
-      <target dev='hda' bus='ide'/>
-    </disk>
-    <graphics type='vnc' autoport='yes' listen='127.0.0.1'>
-      <listen type='address' address='127.0.0.1'/>
-    </graphics>
-    <interface type='network'>
-      <source network='{{.Network}}'/>
-    </interface>
-    <interface type='network'>
-      <source network='{{.PrivateNetwork}}'/>
-    </interface>
-  </devices>
-</domain>`
-	networkXML = `<network>
-  <name>%s</name>
-  <ip address='%s' netmask='%s'>
-    <dhcp>
-      <range start='%s' end='%s'/>
-    </dhcp>
-  </ip>
-</network>`
+	// CRC system bundle
+	"github.com/code-ready/crc/pkg/crc/machine/bundle"
 )
 
 type Driver struct {
 	*drivers.BaseDriver
 
+	// CRC System bundle
+    BundlePath       string
+
+    // Driver specific configuration
 	Memory           int
-	DiskSize         int
 	CPU              int
 	Network          string
 	PrivateNetwork   string
-	ISO              string
-	Boot2DockerURL   string
-	CaCertPath       string
-	PrivateKeyPath   string
 	DiskPath         string
 	CacheMode        string
 	IOMode           string
+
+	// Libvirt connection and state
 	connectionString string
 	conn             *libvirt.Connect
 	VM               *libvirt.Domain
@@ -105,11 +55,6 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Value: 1024,
 		},
 		mcnflag.IntFlag{
-			Name:  "kvm-disk-size",
-			Usage: "Size of disk for host in MB",
-			Value: 20000,
-		},
-		mcnflag.IntFlag{
 			Name:  "kvm-cpu-count",
 			Usage: "Number of CPUs",
 			Value: 1,
@@ -119,12 +64,6 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Name:  "kvm-network",
 			Usage: "Name of network to connect to",
 			Value: "default",
-		},
-		mcnflag.StringFlag{
-			EnvVar: "KVM_BOOT2DOCKER_URL",
-			Name:   "kvm-boot2docker-url",
-			Usage:  "The URL of the boot2docker image. Defaults to the latest available version",
-			Value:  "",
 		},
 		mcnflag.StringFlag{
 			Name:  "kvm-cache-mode",
@@ -160,7 +99,7 @@ func (d *Driver) GetSSHHostname() (string, error) {
 }
 
 func (d *Driver) GetSSHKeyPath() string {
-	return d.ResolveStorePath("id_rsa")
+	return "" //d.ResolveStorePath("id_rsa")
 }
 
 func (d *Driver) GetSSHPort() (int, error) {
@@ -180,40 +119,30 @@ func (d *Driver) GetSSHUsername() string {
 }
 
 func (d *Driver) DriverName() string {
-	return "kvm"
+	return DriverName
+}
+
+func (d *Driver) DriverVersion() string {
+	return DriverVersion
 }
 
 func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	log.Debugf("SetConfigFromFlags called")
-	d.Memory = flags.Int("kvm-memory")
-	d.DiskSize = flags.Int("kvm-disk-size")
-	d.CPU = flags.Int("kvm-cpu-count")
-	d.Network = flags.String("kvm-network")
-	d.Boot2DockerURL = flags.String("kvm-boot2docker-url")
-	d.CacheMode = flags.String("kvm-cache-mode")
-	d.IOMode = flags.String("kvm-io-mode")
-
-	d.SwarmMaster = flags.Bool("swarm-master")
-	d.SwarmHost = flags.String("swarm-host")
-	d.SwarmDiscovery = flags.String("swarm-discovery")
-	d.ISO = d.ResolveStorePath(isoFilename)
-	d.SSHUser = flags.String("kvm-ssh-user")
+	d.Memory = flags.Int("libvirt-memory")
+	d.CPU = flags.Int("libvirt-cpu-count")
+	d.Network = flags.String("libvirt-network")
+	d.CacheMode = flags.String("libvirt-cache-mode")
+	d.IOMode = flags.String("libvirt-io-mode")
 	d.SSHPort = 22
 	d.DiskPath = d.ResolveStorePath(fmt.Sprintf("%s.img", d.MachineName))
+
+	// CRC system bundle
+	d.BundlePath = flags.String("libvirt-bundlepath")
 	return nil
 }
 
 func (d *Driver) GetURL() (string, error) {
-	log.Debugf("GetURL called")
-	ip, err := d.GetIP()
-	if err != nil {
-		log.Warnf("Failed to get IP: %s", err)
-		return "", err
-	}
-	if ip == "" {
-		return "", nil
-	}
-	return fmt.Sprintf("tcp://%s:2376", ip), nil // TODO - don't hardcode the port!
+	return "", nil
 }
 
 func (d *Driver) getConn() (*libvirt.Connect, error) {
@@ -345,16 +274,6 @@ func (d *Driver) PreCreateCheck() error {
 }
 
 func (d *Driver) Create() error {
-	b2dutils := mcnutils.NewB2dUtils(d.StorePath)
-	if err := b2dutils.CopyIsoToMachineDir(d.Boot2DockerURL, d.MachineName); err != nil {
-		return err
-	}
-
-	log.Infof("Creating SSH key...")
-	if err := ssh.GenerateSSHKey(d.GetSSHKeyPath()); err != nil {
-		return err
-	}
-
 	if err := os.MkdirAll(d.ResolveStorePath("."), 0755); err != nil {
 		return err
 	}
@@ -375,10 +294,13 @@ func (d *Driver) Create() error {
 		}
 	}
 
-	log.Debugf("Creating VM data disk...")
-	if err := d.generateDiskImage(d.DiskSize); err != nil {
+	log.Debugf("Extracting system bundle...")
+	err := bundle.Extract(d.BundlePath, d.ResolveStorePath("."))
+	if err != nil {
 		return err
 	}
+
+	// use disk image instead
 
 	log.Debugf("Defining VM...")
 	tmpl, err := template.New("domain").Parse(domainXMLTemplate)
@@ -675,77 +597,6 @@ func (d *Driver) GetIP() (string, error) {
 	}
 	log.Debugf("Unable to locate IP address for MAC %s", mac)
 	return ip, err
-}
-
-func (d *Driver) publicSSHKeyPath() string {
-	return d.GetSSHKeyPath() + ".pub"
-}
-
-// Make a boot2docker VM disk image.
-func (d *Driver) generateDiskImage(size int) error {
-	log.Debugf("Creating %d MB hard disk image...", size)
-
-	magicString := "boot2docker, please format-me"
-
-	buf := new(bytes.Buffer)
-	tw := tar.NewWriter(buf)
-
-	// magicString first so the automount script knows to format the disk
-	file := &tar.Header{Name: magicString, Size: int64(len(magicString))}
-	if err := tw.WriteHeader(file); err != nil {
-		return err
-	}
-	if _, err := tw.Write([]byte(magicString)); err != nil {
-		return err
-	}
-	// .ssh/key.pub => authorized_keys
-	file = &tar.Header{Name: ".ssh", Typeflag: tar.TypeDir, Mode: 0700}
-	if err := tw.WriteHeader(file); err != nil {
-		return err
-	}
-	pubKey, err := ioutil.ReadFile(d.publicSSHKeyPath())
-	if err != nil {
-		return err
-	}
-	file = &tar.Header{Name: ".ssh/authorized_keys", Size: int64(len(pubKey)), Mode: 0644}
-	if err := tw.WriteHeader(file); err != nil {
-		return err
-	}
-	if _, err := tw.Write([]byte(pubKey)); err != nil {
-		return err
-	}
-	file = &tar.Header{Name: ".ssh/authorized_keys2", Size: int64(len(pubKey)), Mode: 0644}
-	if err := tw.WriteHeader(file); err != nil {
-		return err
-	}
-	if _, err := tw.Write([]byte(pubKey)); err != nil {
-		return err
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	raw := bytes.NewReader(buf.Bytes())
-	return createDiskImage(d.DiskPath, size, raw)
-}
-
-// createDiskImage makes a disk image at dest with the given size in MB. If r is
-// not nil, it will be read as a raw disk image to convert from.
-func createDiskImage(dest string, size int, r io.Reader) error {
-	// Convert a raw image from stdin to the dest VMDK image.
-	sizeBytes := int64(size) << 20 // usually won't fit in 32-bit int (max 2GB)
-	f, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-
-	_, err = io.Copy(f, r)
-	if err != nil {
-		return err
-	}
-	// Rely on seeking to create a sparse raw file for qemu
-	f.Seek(sizeBytes-1, 0)
-	f.Write([]byte{0})
-	return f.Close()
 }
 
 func NewDriver(hostName, storePath string) drivers.Driver {
