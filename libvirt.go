@@ -22,7 +22,9 @@ import (
 	"github.com/code-ready/machine/libmachine/state"
 
 	// CRC system bundle
+	"github.com/code-ready/crc/pkg/crc/constants"
 	"github.com/code-ready/crc/pkg/crc/machine/bundle"
+	crclibvirt "github.com/code-ready/crc/pkg/crc/machine/libvirt"
 )
 
 type Driver struct {
@@ -35,7 +37,6 @@ type Driver struct {
 	Memory           int
 	CPU              int
 	Network          string
-	PrivateNetwork   string
 	DiskPath         string
 	CacheMode        string
 	IOMode           string
@@ -50,43 +51,36 @@ type Driver struct {
 func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 	return []mcnflag.Flag{
 		mcnflag.IntFlag{
-			Name:  "kvm-memory",
+			Name:  "crc-libvirt-memory",
 			Usage: "Size of memory for host in MB",
-			Value: 1024,
+			Value: constants.DefaultMemory,
 		},
 		mcnflag.IntFlag{
-			Name:  "kvm-cpu-count",
+			Name:  "crc-libvirt-cpu-count",
 			Usage: "Number of CPUs",
-			Value: 1,
+			Value: constants.DefaultCPUs,
 		},
-		// TODO - support for multiple networks
 		mcnflag.StringFlag{
-			Name:  "kvm-network",
+			Name:  "crc-libvirt-network",
 			Usage: "Name of network to connect to",
-			Value: "default",
+			Value: crclibvirt.DefaultNetwork,
 		},
 		mcnflag.StringFlag{
-			Name:  "kvm-cache-mode",
+			Name:  "crc-libvirt-cachemode",
 			Usage: "Disk cache mode: default, none, writethrough, writeback, directsync, or unsafe",
-			Value: "default",
+			Value: crclibvirt.DefaultCacheMode,
 		},
 		mcnflag.StringFlag{
-			Name:  "kvm-io-mode",
+			Name:  "crc-libvirt-iomode",
 			Usage: "Disk IO mode: threads, native",
-			Value: "threads",
+			Value: crclibvirt.DefaultIOMode,
 		},
 		mcnflag.StringFlag{
-			EnvVar: "KVM_SSH_USER",
-			Name:   "kvm-ssh-user",
+			EnvVar: "CRC_LIBVIRT_SSHUSER",
+			Name:   "crc-libvirt-sshuser",
 			Usage:  "SSH username",
-			Value:  defaultSSHUser,
+			Value:  constants.DefaultSSHUser,
 		},
-		/* Not yet implemented
-		mcnflag.Flag{
-			Name:  "kvm-no-share",
-			Usage: "Disable the mount of your home directory",
-		},
-		*/
 	}
 }
 
@@ -104,7 +98,7 @@ func (d *Driver) GetSSHKeyPath() string {
 
 func (d *Driver) GetSSHPort() (int, error) {
 	if d.SSHPort == 0 {
-		d.SSHPort = 22
+		d.SSHPort = constants.DefaultSSHPort
 	}
 
 	return d.SSHPort, nil
@@ -112,7 +106,7 @@ func (d *Driver) GetSSHPort() (int, error) {
 
 func (d *Driver) GetSSHUsername() string {
 	if d.SSHUser == "" {
-		d.SSHUser = "docker"
+		d.SSHUser = constants.DefaultSSHUser
 	}
 
 	return d.SSHUser
@@ -131,8 +125,8 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.Memory = flags.Int("libvirt-memory")
 	d.CPU = flags.Int("libvirt-cpu-count")
 	d.Network = flags.String("libvirt-network")
-	d.CacheMode = flags.String("libvirt-cache-mode")
-	d.IOMode = flags.String("libvirt-io-mode")
+	d.CacheMode = flags.String("libvirt-cachemode")
+	d.IOMode = flags.String("libvirt-iomode")
 	d.SSHPort = 22
 	d.DiskPath = d.ResolveStorePath(fmt.Sprintf("%s.img", d.MachineName))
 
@@ -158,13 +152,13 @@ func (d *Driver) getConn() (*libvirt.Connect, error) {
 }
 
 // Create, or verify the private network is properly configured
-func (d *Driver) validatePrivateNetwork() error {
-	log.Debug("Validating private network")
+func (d *Driver) validateNetwork() error {
+	log.Debug("Validating network")
 	conn, err := d.getConn()
 	if err != nil {
 		return err
 	}
-	network, err := conn.LookupNetworkByName(d.PrivateNetwork)
+	network, err := conn.LookupNetworkByName(d.Network)
 	if err == nil {
 		xmldoc, err := network.GetXMLDesc(0)
 		if err != nil {
@@ -173,14 +167,14 @@ func (d *Driver) validatePrivateNetwork() error {
 		/* XML structure:
 		<network>
 		    ...
-		    <ip address='a.b.c.d' netmask='255.255.255.0'>
+		    <ip address='a.b.c.d' prefix='24'>
 		        <dhcp>
-		            <range start='a.b.c.d' end='w.x.y.z'/>
+		            <host mac='' name='' ip=''/>
 		        </dhcp>
 		*/
 		type Ip struct {
 			Address string `xml:"address,attr"`
-			Netmask string `xml:"netmask,attr"`
+			Netmask string `xml:"prefix,attr"`
 		}
 		type Network struct {
 			Ip Ip `xml:"ip"`
@@ -193,11 +187,11 @@ func (d *Driver) validatePrivateNetwork() error {
 		}
 
 		if nw.Ip.Address == "" {
-			return fmt.Errorf("%s network doesn't have DHCP configured properly", d.PrivateNetwork)
+			return fmt.Errorf("%s network doesn't have DHCP configured properly", d.Network)
 		}
 		// Corner case, but might happen...
 		if active, err := network.IsActive(); !active {
-			log.Debugf("Reactivating private network: %s", err)
+			log.Debugf("Reactivating network: %s", err)
 			err = network.Create()
 			if err != nil {
 				log.Warnf("Failed to Start network: %s", err)
@@ -208,38 +202,38 @@ func (d *Driver) validatePrivateNetwork() error {
 	}
 	// TODO - try a couple pre-defined networks and look for conflicts before
 	//        settling on one
-	xml := fmt.Sprintf(networkXML, d.PrivateNetwork,
-		"192.168.42.1",
-		"255.255.255.0",
-		"192.168.42.2",
-		"192.168.42.254")
 
-	network, err = conn.NetworkDefineXML(xml)
+
+	log.Debugf("Defining network...")
+	tmpl, err := template.New("network").Parse(crclibvirt.NetworkTemplate)
 	if err != nil {
-		log.Errorf("Failed to create private network: %s", err)
+		return err
+	}
+
+	config := crclibvirt.NetworkConfig{
+		DomainName: d.MachineName,
+		MAC:        crclibvirt.MACAddress,
+		IP:         crclibvirt.IPAddress,
+	}
+
+	var xml bytes.Buffer
+	err = tmpl.Execute(&xml, config)
+	if err != nil {
+		return err
+	}
+
+	network, err = conn.NetworkDefineXML(xml.String())
+	if err != nil {
+		log.Errorf("Failed to create network: %s", err)
 		return nil
 	}
 	err = network.SetAutostart(true)
 	if err != nil {
-		log.Warnf("Failed to set private network to autostart: %s", err)
+		log.Warnf("Failed to set network to autostart: %s", err)
 	}
 	err = network.Create()
 	if err != nil {
 		log.Warnf("Failed to Start network: %s", err)
-		return err
-	}
-	return nil
-}
-
-func (d *Driver) validateNetwork(name string) error {
-	log.Debugf("Validating network %s", name)
-	conn, err := d.getConn()
-	if err != nil {
-		return err
-	}
-	_, err = conn.LookupNetworkByName(name)
-	if err != nil {
-		log.Errorf("Unable to locate network %s", name)
 		return err
 	}
 	return nil
@@ -261,11 +255,7 @@ func (d *Driver) PreCreateCheck() error {
 		log.Warnf("Unable to get libvirt version")
 		return err
 	}
-	err = d.validatePrivateNetwork()
-	if err != nil {
-		return err
-	}
-	err = d.validateNetwork(d.Network)
+	err = d.validateNetwork()
 	if err != nil {
 		return err
 	}
@@ -274,6 +264,7 @@ func (d *Driver) PreCreateCheck() error {
 }
 
 func (d *Driver) Create() error {
+
 	if err := os.MkdirAll(d.ResolveStorePath("."), 0755); err != nil {
 		return err
 	}
@@ -300,15 +291,24 @@ func (d *Driver) Create() error {
 		return err
 	}
 
-	// use disk image instead
-
 	log.Debugf("Defining VM...")
-	tmpl, err := template.New("domain").Parse(domainXMLTemplate)
+	tmpl, err := template.New("domain").Parse(crclibvirt.DomainTemplate)
 	if err != nil {
 		return err
 	}
+
+	config := crclibvirt.DomainConfig{
+		DomainName: d.MachineName,
+		Memory:     d.Memory,
+		CPU:        d.CPU,
+		CacheMode:  d.CacheMode,
+		IOMode:     d.IOMode,
+		DiskPath:   d.DiskPath,
+		Network:    d.Network,
+	}
+
 	var xml bytes.Buffer
-	err = tmpl.Execute(&xml, d)
+	err = tmpl.Execute(&xml, config)
 	if err != nil {
 		return err
 	}
@@ -317,6 +317,7 @@ func (d *Driver) Create() error {
 	if err != nil {
 		return err
 	}
+
 	vm, err := conn.DomainDefineXML(xml.String())
 	if err != nil {
 		log.Warnf("Failed to create the VM: %s", err)
@@ -506,16 +507,12 @@ func (d *Driver) getMAC() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Always assume the second interface is the one we want
-	if len(dom.Devices.Interfaces) < 2 {
-		return "", fmt.Errorf("VM doesn't have enough network interfaces.  Expected at least 2, found %d",
-			len(dom.Devices.Interfaces))
-	}
-	return dom.Devices.Interfaces[1].Mac.Address, nil
+
+	return dom.Devices.Interfaces[0].Mac.Address, nil
 }
 
 func (d *Driver) getIPByMACFromLeaseFile(mac string) (string, error) {
-	leaseFile := fmt.Sprintf(dnsmasqLeases, d.PrivateNetwork)
+	leaseFile := fmt.Sprintf(dnsmasqLeases, d.Network)
 	data, err := ioutil.ReadFile(leaseFile)
 	if err != nil {
 		log.Debugf("Failed to retrieve dnsmasq leases from %s", leaseFile)
@@ -543,7 +540,7 @@ func (d *Driver) getIPByMacFromSettings(mac string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	network, err := conn.LookupNetworkByName(d.PrivateNetwork)
+	network, err := conn.LookupNetworkByName(d.Network)
 	if err != nil {
 		log.Warnf("Failed to find network: %s", err)
 		return "", err
@@ -595,17 +592,17 @@ func (d *Driver) GetIP() (string, error) {
 	if ip == "" {
 		ip, err = d.getIPByMacFromSettings(mac)
 	}
-	log.Debugf("Unable to locate IP address for MAC %s", mac)
+
 	return ip, err
 }
 
 func NewDriver(hostName, storePath string) drivers.Driver {
 	return &Driver{
-		PrivateNetwork: privateNetworkName,
+		Network: crclibvirt.DefaultNetwork,
 		BaseDriver: &drivers.BaseDriver{
-			SSHUser:     defaultSSHUser,
 			MachineName: hostName,
 			StorePath:   storePath,
+			SSHUser:     constants.DefaultSSHUser,
 		},
 	}
 }
