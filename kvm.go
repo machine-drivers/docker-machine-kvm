@@ -60,9 +60,11 @@ const (
     </graphics>
     <interface type='network'>
       <source network='{{.Network}}'/>
+      <model type='e1000'/>
     </interface>
     <interface type='network'>
       <source network='{{.PrivateNetwork}}'/>
+      <model type='e1000'/>
     </interface>
   </devices>
 </domain>`
