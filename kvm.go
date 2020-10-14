@@ -665,11 +665,22 @@ func (d *Driver) GetIP() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	/*
-	 * TODO - Figure out what version of libvirt changed behavior and
-	 *        be smarter about selecting which algorithm to use
-	 */
-	ip, err := d.getIPByMACFromLeaseFile(mac)
+	conn, err := d.getConn()
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	var ip string
+	libVersion, err := conn.GetLibVersion()
+	if err != nil {
+		return "", err
+	}
+
+	// Earlier versions of libvirt use a lease file instead of a status file
+	if libVersion < 1002006 {
+		ip, err = d.getIPByMACFromLeaseFile(mac)
+	}
 	if ip == "" {
 		ip, err = d.getIPByMacFromSettings(mac)
 	}
